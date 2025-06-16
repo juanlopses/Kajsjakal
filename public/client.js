@@ -1,127 +1,78 @@
 const socket = io();
-let token, currentUser, currentChatUser;
 
-const authDiv = document.getElementById('auth');
-const chatDiv = document.getElementById('chat');
-const authForm = document.getElementById('auth-form');
-const authTitle = document.getElementById('auth-title');
-const toggleAuth = document.getElementById('toggle-auth');
-const searchInput = document.getElementById('search');
-const userList = document.getElementById('user-list');
-const messagesDiv = document.getElementById('messages');
-const messageForm = document.getElementById('message-form');
-const messageInput = document.getElementById('message-input');
-const chatWith = document.getElementById('chat-with');
+let currentUserId = null;
+let currentChatId = null;
 
-let isLogin = true;
+const searchInput = document.getElementById("searchInput");
+const chatList = document.getElementById("chatList");
+const messageContainer = document.getElementById("messageContainer");
+const messageInput = document.getElementById("messageInput");
+const sendMessageBtn = document.getElementById("sendMessageBtn");
+const chatHeader = document.getElementById("chatHeader");
+const typingStatus = document.getElementById("typing-status");
+const searchResults = document.getElementById("searchResults");
 
-toggleAuth.addEventListener('click', () => {
-  isLogin = !isLogin;
-  authTitle.textContent = isLogin ? 'Iniciar Sesión' : 'Registrarse';
-  toggleAuth.textContent = isLogin ? '¿No tienes una cuenta? Regístrate' : '¿Ya tienes una cuenta? Inicia sesión';
-});
-
-authForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const username = document.getElementById('username').value;
-  const password = document.getElementById('password').value;
-  const endpoint = isLogin ? '/login' : '/register';
-  try {
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message);
-    if (isLogin) {
-      token = data.token;
-      currentUser = { id: jwt_decode(token).id, username: data.username };
-      authDiv.style.display = 'none';
-      chatDiv.style.display = 'flex';
-      socket.emit('join', currentUser.id.toString());
-    }
-    alert(data.message);
-  } catch (error) {
-    alert(error.message);
-  }
-});
-
-searchInput.addEventListener('input', async () => {
+// Buscar usuarios
+searchInput.addEventListener("input", async () => {
   const query = searchInput.value;
-  if (!query) {
-    userList.innerHTML = '';
-    return;
-  }
-  try {
-    const response = await fetch(`/search/${query}`, {
-      headers: { 'Authorization': `Bearer ${token}` }
+  const response = await fetch(`/search/${query}`);
+  const users = await response.json();
+  searchResults.innerHTML = users.map(user => `
+    <div class="chat-item" onclick="startChat(${user.id}, '${user.username}')">
+      ${user.username}
+    </div>
+  `).join('');
+});
+
+// Iniciar chat con un usuario
+function startChat(userId, username) {
+  currentChatId = userId;
+  chatHeader.textContent = username;
+  messageContainer.innerHTML = '';
+
+  // Mostrar mensajes de chat
+  fetch(`/messages/${currentUserId}/${userId}`)
+    .then((res) => res.json())
+    .then((messages) => {
+      messageContainer.innerHTML = messages.map((msg) => `
+        <div class="message ${msg.senderId === currentUserId ? 'sent' : 'received'}">
+          <div class="bubble">${msg.content}</div>
+        </div>
+      `).join('');
     });
-    const users = await response.json();
-    userList.innerHTML = '';
-    users.forEach(user => {
-      const li = document.createElement('li');
-      li.textContent = user.username;
-      li.onclick = () => startChat(user);
-      userList.appendChild(li);
-    });
-  } catch (error) {
-    console.error(error);
+}
+
+// Enviar mensaje
+sendMessageBtn.addEventListener("click", () => {
+  const messageContent = messageInput.value;
+  if (messageContent.trim()) {
+    const message = {
+      senderId: currentUserId,
+      receiverId: currentChatId,
+      content: messageContent,
+    };
+
+    socket.emit("sendMessage", message);
+    messageInput.value = '';
   }
 });
 
-messageForm.addEventListener('submit', (e) => {
-  e.preventDefault();
-  if (!currentChatUser) return;
-  const content = messageInput.value;
-  if (!content) return;
-  const message = {
-    senderId: currentUser.id,
-    receiverId: currentChatUser.id,
-    content
-  };
-  socket.emit('sendMessage', message);
-  messageInput.value = '';
-});
-
-socket.on('receiveMessage', (message) => {
-  if (
-    (message.senderId === currentUser.id && message.receiverId === currentChatUser?.id) ||
-    (message.senderId === currentChatUser?.id && message.receiverId === currentUser.id)
-  ) {
-    displayMessage(message);
+// Actualizar chat cuando llega un nuevo mensaje
+socket.on("newMessage", (message) => {
+  if (message.receiverId === currentUserId || message.senderId === currentUserId) {
+    messageContainer.innerHTML += `
+      <div class="message ${message.senderId === currentUserId ? 'sent' : 'received'}">
+        <div class="bubble">${message.content}</div>
+      </div>
+    `;
   }
 });
 
-async function startChat(user) {
-  currentChatUser = user;
-  chatWith.textContent = `Chateando con ${user.username}`;
-  messagesDiv.innerHTML = '';
-  try {
-    const response = await fetch(`/messages/${currentUser.id}/${user.id}`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    });
-    const messages = await response.json();
-    messages.forEach(displayMessage);
-  } catch (error) {
-    console.error(error);
+// Notificar que el usuario está escribiendo
+messageInput.addEventListener("input", () => {
+  if (messageInput.value) {
+    typingStatus.textContent = "Escribiendo...";
+  } else {
+    typingStatus.textContent = "";
   }
-}
-
-function displayMessage(message) {
-  const div = document.createElement('div');
-  div.className = `message ${message.senderId === currentUser.id ? 'sent' : 'received'}`;
-  div.textContent = message.content;
-  messagesDiv.appendChild(div);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
-}
-
-// Simple JWT decode function
-function jwt_decode(token) {
-  const base64Url = token.split('.')[1];
-  const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-  const jsonPayload = decodeURIComponent(atob(base64).split('').map(c => {
-    return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
-  }).join(''));
-  return JSON.parse(jsonPayload);
-}
+});
