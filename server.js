@@ -1,120 +1,134 @@
-const express = require('express');
-const cors = require('cors');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const fs = require('fs');
-const path = require('path');
-const http = require('http');
-const { Server } = require('socket.io');
+const express = require("express");
+const socketIo = require("socket.io");
+const http = require("http");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
+const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
-  }
-});
+const io = socketIo(server);
 
-const PORT = process.env.PORT || 3000;
-const SECRET_KEY = 'your-secret-key';
+const SECRET_KEY = 'your-secret-key'; // En un entorno real usa una variable de entorno
+const usersFile = path.join(__dirname, "data", "users.json");
+const messagesFile = path.join(__dirname, "data", "messages.json");
 
-app.use(cors());
+// Middleware
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(cors());
+app.use(express.static(path.join(__dirname, "public")));
 
-// Load JSON data
-const usersFile = path.join(__dirname, 'data', 'users.json');
-const messagesFile = path.join(__dirname, 'data', 'messages.json');
-
-let users = [];
-let messages = [];
-
-if (fs.existsSync(usersFile)) {
-  users = JSON.parse(fs.readFileSync(usersFile));
-}
-if (fs.existsSync(messagesFile)) {
-  messages = JSON.parse(fs.readFileSync(messagesFile));
+// Funciones auxiliares para leer y escribir en archivos JSON
+function readJsonFile(filePath) {
+  const rawData = fs.readFileSync(filePath);
+  return JSON.parse(rawData);
 }
 
-// Save data to JSON files
-const saveUsers = () => fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
-const saveMessages = () => fs.writeFileSync(messagesFile, JSON.stringify(messages, null, 2));
+function writeJsonFile(filePath, data) {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+}
 
-// Register
-app.post('/register', async (req, res) => {
+// Rutas de autenticación y mensajes
+app.post("/register", (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ message: 'Se requieren nombre de usuario y contraseña' });
+  const users = readJsonFile(usersFile);
+
+  // Verificar si el nombre de usuario ya está registrado
+  if (users.some((user) => user.username === username)) {
+    return res.status(400).json({ error: "Usuario ya existe" });
   }
-  if (users.find(u => u.username === username)) {
-    return res.status(400).json({ message: 'El nombre de usuario ya existe' });
-  }
-  const hashedPassword = await bcrypt.hash(password, 10);
-  const user = { id: users.length + 1, username, password: hashedPassword };
-  users.push(user);
-  saveUsers();
-  res.status(201).json({ message: 'Usuario registrado con éxito' });
+
+  // Cifrar la contraseña
+  const hashedPassword = bcrypt.hashSync(password, 10);
+
+  const newUser = {
+    id: Date.now(),
+    username,
+    password: hashedPassword,
+  };
+
+  users.push(newUser);
+  writeJsonFile(usersFile, users);
+
+  // Crear y enviar token JWT
+  const token = jwt.sign({ id: newUser.id, username: newUser.username }, SECRET_KEY, {
+    expiresIn: "1h",
+  });
+
+  res.status(201).json({ token });
 });
 
-// Login
-app.post('/login', async (req, res) => {
+app.post("/login", (req, res) => {
   const { username, password } = req.body;
-  const user = users.find(u => u.username === username);
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ message: 'Credenciales inválidas' });
+  const users = readJsonFile(usersFile);
+
+  const user = users.find((user) => user.username === username);
+  if (!user || !bcrypt.compareSync(password, user.password)) {
+    return res.status(401).json({ error: "Credenciales incorrectas" });
   }
-  const token = jwt.sign({ id: user.id, username: user.username }, SECRET_KEY, { expiresIn: '1h' });
-  res.json({ token, username: user.username });
+
+  const token = jwt.sign({ id: user.id, username: user.username }, SECRET_KEY, {
+    expiresIn: "1h",
+  });
+
+  res.json({ token });
 });
 
-// Search users
-app.get('/search/:query', (req, res) => {
+app.get("/search/:query", (req, res) => {
   const { query } = req.params;
-  const token = req.headers.authorization?.split(' ')[1];
-  try {
-    jwt.verify(token, SECRET_KEY);
-    const foundUsers = users.filter(u => u.username.toLowerCase().includes(query.toLowerCase())).map(u => ({ id: u.id, username: u.username }));
-    res.json(foundUsers);
-  } catch (error) {
-    res.status(401).json({ message: 'No autorizado' });
-  }
+  const users = readJsonFile(usersFile);
+
+  const results = users.filter((user) => user.username.toLowerCase().includes(query.toLowerCase()));
+  res.json(results);
 });
 
-// Get messages between two users
-app.get('/messages/:userId1/:userId2', (req, res) => {
+app.get("/messages/:userId1/:userId2", (req, res) => {
   const { userId1, userId2 } = req.params;
-  const token = req.headers.authorization?.split(' ')[1];
-  try {
-    jwt.verify(token, SECRET_KEY);
-    const chatMessages = messages.filter(
-      m => (m.senderId == userId1 && m.receiverId == userId2) || (m.senderId == userId2 && m.receiverId == userId1)
-    );
-    res.json(chatMessages);
-  } catch (error) {
-    res.status(401).json({ message: 'No autorizado' });
-  }
+  const messages = readJsonFile(messagesFile);
+  
+  const userMessages = messages.filter(
+    (msg) =>
+      (msg.senderId === parseInt(userId1) && msg.receiverId === parseInt(userId2)) ||
+      (msg.senderId === parseInt(userId2) && msg.receiverId === parseInt(userId1))
+  );
+
+  res.json(userMessages);
 });
 
-// Socket.IO for real-time chat
-io.on('connection', (socket) => {
-  socket.on('join', (userId) => {
+// Conexión de Socket.io para chat en tiempo real
+io.on("connection", (socket) => {
+  console.log("Un usuario se conectó");
+
+  socket.on("join", (userId) => {
     socket.join(userId);
   });
 
-  socket.on('sendMessage', ({ senderId, receiverId, content }) => {
-    const message = {
-      id: messages.length + 1,
+  socket.on("sendMessage", (message) => {
+    const { senderId, receiverId, content } = message;
+    const newMessage = {
+      id: Date.now(),
       senderId,
       receiverId,
       content,
-      timestamp: new Date().toISOString()
+      timestamp: new Date(),
     };
-    messages.push(message);
-    saveMessages();
-    io.to(receiverId).emit('receiveMessage', message);
-    io.to(senderId).emit('receiveMessage', message);
+
+    const messages = readJsonFile(messagesFile);
+    messages.push(newMessage);
+    writeJsonFile(messagesFile, messages);
+
+    io.to(receiverId).emit("newMessage", newMessage);
+    socket.emit("newMessage", newMessage);
+  });
+
+  socket.on("disconnect", () => {
+    console.log("Un usuario se desconectó");
   });
 });
 
-server.listen(PORT, () => console.log(`Servidor corriendo en el puerto ${PORT}`));
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Servidor corriendo en http://localhost:${PORT}`);
+});
